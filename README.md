@@ -43,7 +43,8 @@ npx @capacitor/assets generate --android --splashBackgroundColor '#6366f1' --spl
 
 ## Web version (GitHub Pages)
 
-Every push to `main` builds the site and publishes it with `.github/workflows/pages.yml`.
+Every push to `main` builds the site, and `.github/workflows/pages.yml` publishes it to the
+`gh-pages` branch, which GitHub Pages serves.
 After the first visit, a service worker (`sw.template.js`, filled in at build time by
 `vite.config.ts`) keeps every file cached, so the installed web app works offline.
 `npm run dev` runs it locally. The camera button needs HTTPS (or localhost).
