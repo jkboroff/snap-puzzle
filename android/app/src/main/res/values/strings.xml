@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Snap Puzzle</string>
+    <string name="title_activity_main">Snap Puzzle</string>
+    <string name="package_name">app.snappuzzle</string>
+    <string name="custom_url_scheme">app.snappuzzle</string>
+</resources>

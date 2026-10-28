@@ -1,0 +1,15 @@
+node_modules
+dist
+*.log
+.DS_Store
+
+# Android build output and signing secrets
+android/app/build
+android/build
+android/.gradle
+android/local.properties
+android/keystore.properties
+*.jks
+*.keystore
+*.apk
+*.aab
