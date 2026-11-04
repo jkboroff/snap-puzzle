@@ -4,6 +4,14 @@ A kids' jigsaw game made from your own photos. Take a picture, or pick one from 
 becomes a 12, 20, 30 or 42 piece jigsaw with real hand-cut pieces. Drag the pieces onto the board
 with your fingers; they click in when they're in the right spot.
 
+- Two piece styles, picked on the My Pictures screen: 🧩 jigsaw, or 💎 glass, where the picture
+  cracks into straight-edged shards like a broken pane (`src/glass.ts`). Glass shards are the same
+  size as jigsaw pieces and clink when they go in.
+- A different celebration for each finished puzzle: confetti, fireworks, side cannons, a star
+  shower, raining animals or floating balloons, each with its own fanfare and cheer, and the picture
+  does a little dance (`src/celebrations.ts`).
+- Kid-proof: once the first piece is in, the buttons that would restart the puzzle are hidden, and
+  leaving (the My Pictures button or Android's back button) asks "Stop this puzzle?" first.
 - Works offline. Photos stay on the device, in the app's own storage (the last 12 are kept).
 - No ads, accounts or tracking.
 - Grown-up settings (gear icon): the child's name for the cheers ("You did it, Sam!"), and sound on/off.

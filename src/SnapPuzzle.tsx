@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { Camera, ImagePlus, ArrowLeft, Shuffle, Eye, EyeOff, Trash2, RotateCcw, Settings, X } from 'lucide-react';
-import confetti from 'canvas-confetti';
 import { App as NativeApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { speak, setSpeechEnabled } from './speech';
-import { playPlop, playFanfare, setSfxEnabled } from './sfx';
+import { playPlop, playClink, playFanfare, setSfxEnabled } from './sfx';
 import { addPhoto, deletePhoto, listPhotos, type PuzzlePhoto } from './photoStore';
+import { makeShards } from './glass';
+import { dance, pickCelebration, type Celebration } from './celebrations';
 
 // Board coordinates are in "cells": the board is cols x rows, one unit per piece.
 const TAB = 0.25; // how far a knob sticks out past its cell
@@ -23,13 +24,20 @@ const GRID_SIZES = [
   { cols: 7, rows: 6, emoji: '🐉' },
 ];
 
+// Classic jigsaw pieces, or a picture that has cracked like a pane of glass
+const STYLES = [
+  { id: 'jigsaw', emoji: '🧩', label: 'Jigsaw' },
+  { id: 'glass', emoji: '💎', label: 'Glass' },
+] as const;
+type PieceStyle = (typeof STYLES)[number]['id'];
+
 const PRAISE = ['It fits!', 'Click!', 'Great job!', 'Nice!', 'You found it!', 'Yay!'];
 
 interface Piece {
   id: number;
-  col: number;
-  row: number;
-  path: string;
+  hx: number; // where the piece's 0,0 sits on the board when it's in the right spot
+  hy: number;
+  path: string; // outline in the piece's own units, roughly filling 0..1 like one grid cell
   slot: number; // tray slot it starts in
   jx: number; // small random offset so the tray looks scattered
   jy: number;
@@ -206,6 +214,9 @@ export const SnapPuzzle: React.FC = () => {
     const saved = readNumber('snap_puzzle_pieces', 0);
     return Math.max(0, GRID_SIZES.findIndex((g) => g.cols * g.rows === saved));
   });
+  const [pieceStyle, setPieceStyle] = useState<PieceStyle>(() =>
+    readString('snap_puzzle_style', 'jigsaw') === 'glass' ? 'glass' : 'jigsaw'
+  );
   // Grown-up settings: the child's name makes the cheers personal. Sound (voice and effects) starts off
   // so the app is quiet until a grown-up turns it on.
   const [childName, setChildName] = useState<string>(() => readString('snap_puzzle_name', ''));
@@ -216,6 +227,9 @@ export const SnapPuzzle: React.FC = () => {
   const [draggingIds, setDraggingIds] = useState<number[]>([]);
   const [showPeek, setShowPeek] = useState<boolean>(true);
   const [isSolved, setIsSolved] = useState<boolean>(false);
+  const [celebration, setCelebration] = useState<Celebration | null>(null);
+  // "Leave this puzzle?" so a stray tap doesn't throw away a half-done puzzle
+  const [confirmLeave, setConfirmLeave] = useState<boolean>(false);
   const [isBusy, setIsBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [solvedCount, setSolvedCount] = useState<number>(() => readNumber('snap_puzzle_solved', 0));
@@ -231,6 +245,12 @@ export const SnapPuzzle: React.FC = () => {
   const dragsRef = useRef(new Map<number, { id: number; offX: number; offY: number; x: number; y: number }>());
   // Set when a puzzle starts; the board is scrolled into view once it has rendered
   const scrollPendingRef = useRef(false);
+  // Stops a celebration that is still going (fireworks, balloons) when a new puzzle starts
+  const stopCelebrationRef = useRef<() => void>(() => {});
+  const stopCelebration = () => {
+    stopCelebrationRef.current();
+    stopCelebrationRef.current = () => {};
+  };
 
   // Set before the first speak() call below so a muted app stays quiet on launch
   setSpeechEnabled(soundOn);
@@ -247,12 +267,35 @@ export const SnapPuzzle: React.FC = () => {
 
   useEffect(() => save('snap_puzzle_name', childName.trim()), [childName]);
   useEffect(() => save('snap_puzzle_sound', soundOn ? 'on' : 'off'), [soundOn]);
+  useEffect(() => save('snap_puzzle_style', pieceStyle), [pieceStyle]);
+  useEffect(() => () => stopCelebrationRef.current(), []);
 
-  // Android back button: close settings, then leave the puzzle, then leave the app
+  // Once a piece is in, the puzzle is "in progress": the buttons that would start it over are hidden,
+  // and leaving asks first
+  const placedCount = pieces.filter((p) => p.placed).length;
+  const inProgress = !!photo && !isSolved && placedCount > 0;
+
+  const leavePuzzle = () => {
+    stopCelebration();
+    setConfirmLeave(false);
+    setPhoto(null);
+  };
+  const askToLeave = () => {
+    if (!inProgress) {
+      leavePuzzle();
+      return;
+    }
+    setConfirmLeave(true);
+    speak('Do you want to stop this puzzle?');
+  };
+
+  // Android back button: close a dialog (back on "Leave this puzzle?" means keep playing), then leave
+  // the puzzle, then leave the app
   const backRef = useRef<() => void>(() => {});
   backRef.current = () => {
-    if (showSettings) setShowSettings(false);
-    else if (photo) setPhoto(null);
+    if (confirmLeave) setConfirmLeave(false);
+    else if (showSettings) setShowSettings(false);
+    else if (photo) askToLeave();
     else NativeApp.exitApp();
   };
   useEffect(() => {
@@ -317,9 +360,14 @@ export const SnapPuzzle: React.FC = () => {
     [grid.cols, grid.rows, pieceCount, areaWidth, viewportH, areaTop]
   );
 
-  const startPuzzle = (nextPhoto: PuzzlePhoto, nextSizeIdx: number) => {
+  const startPuzzle = (nextPhoto: PuzzlePhoto, nextSizeIdx: number, nextStyle: PieceStyle = pieceStyle) => {
     const { cols, rows } = gridFor(nextPhoto, nextSizeIdx);
-    const shapes = makePieceShapes(cols, rows);
+    const shapes =
+      nextStyle === 'glass'
+        ? makeShards(cols, rows)
+        : makePieceShapes(cols, rows)
+            .flat()
+            .map((path, i) => ({ path, hx: i % cols, hy: Math.floor(i / cols) }));
     const slots = Array.from({ length: cols * rows }, (_, i) => i);
     for (let i = slots.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -327,17 +375,14 @@ export const SnapPuzzle: React.FC = () => {
     }
     const jitter = () => (Math.random() - 0.5) * 0.12;
     dragsRef.current.clear();
+    stopCelebration();
     setDraggingIds([]);
     setIsSolved(false);
-    setPieces(
-      slots.map((slot, id) => {
-        const col = id % cols;
-        const row = Math.floor(id / cols);
-        return { id, col, row, path: shapes[row][col], slot, jx: jitter(), jy: jitter(), free: null, placed: false };
-      })
-    );
+    setConfirmLeave(false);
+    setPieces(slots.map((slot, id) => ({ id, ...shapes[id], slot, jx: jitter(), jy: jitter(), free: null, placed: false })));
     setPhoto(nextPhoto);
     setSizeIdx(nextSizeIdx);
+    setPieceStyle(nextStyle);
     scrollPendingRef.current = true;
   };
 
@@ -354,7 +399,7 @@ export const SnapPuzzle: React.FC = () => {
   }, [isSolved]);
 
   const restPos = (p: Piece) => {
-    if (p.placed) return { x: p.col, y: p.row };
+    if (p.placed) return { x: p.hx, y: p.hy };
     // A drop spot only counts for the layout it was made in; if the tray moved (tablet rotated)
     // the piece goes back to its tray slot so it can't end up off screen
     if (p.free && p.free.layoutKey === layout.key) return p.free;
@@ -407,7 +452,7 @@ export const SnapPuzzle: React.FC = () => {
     setDraggingIds((ids) => ids.filter((id) => id !== drag.id));
     const piece = pieces.find((p) => p.id === drag.id);
     if (!piece) return;
-    const fits = Math.hypot(drag.x - piece.col, drag.y - piece.row) < SNAP;
+    const fits = Math.hypot(drag.x - piece.hx, drag.y - piece.hy) < SNAP;
     setPieces((prev) =>
       prev.map((p) =>
         p.id !== drag.id
@@ -418,7 +463,8 @@ export const SnapPuzzle: React.FC = () => {
       )
     );
     if (!fits) return;
-    playPlop();
+    if (pieceStyle === 'glass') playClink();
+    else playPlop();
     // pointerup is a discrete event, so React has re-rendered before the next one and `pieces` is current
     const left = pieces.filter((p) => !p.placed && p.id !== drag.id).length;
     if (left > 0) {
@@ -427,11 +473,14 @@ export const SnapPuzzle: React.FC = () => {
     }
     setIsSolved(true);
     setSolvedCount((c) => c + 1);
-    playFanfare();
-    speak(`Hooray${name ? ` ${name}` : ''}! You put your picture back together!`);
-    try {
-      confetti({ particleCount: 120, spread: 90, origin: { y: 0.6 } });
-    } catch {}
+    const next = pickCelebration(celebration);
+    setCelebration(next);
+    playFanfare(next.tune);
+    speak(next.cheer.replace('{name}', name ? `, ${name}` : ''));
+    stopCelebration();
+    stopCelebrationRef.current = next.run();
+    // After the seamless picture has replaced the pieces
+    requestAnimationFrame(() => dance(svgRef.current));
   };
 
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -459,7 +508,6 @@ export const SnapPuzzle: React.FC = () => {
     setPhotos(await listPhotos());
   };
 
-  const placedCount = pieces.filter((p) => p.placed).length;
   // Placed pieces sit underneath loose ones; loose ones keep their pick-up order
   const renderOrder = [...pieces.filter((p) => p.placed), ...pieces.filter((p) => !p.placed)];
   const boardImage = (opacity: number) =>
@@ -506,11 +554,12 @@ export const SnapPuzzle: React.FC = () => {
         </div>
       </header>
 
-      {/* Piece count (shared by both screens) */}
+      {/* Piece count (shared by both screens) and style. While a puzzle is in progress the buttons that
+          would start it over are hidden; they keep their space so the board doesn't jump. */}
       <div className="flex flex-wrap items-center justify-between gap-2.5">
         {photo ? (
           <button
-            onClick={() => setPhoto(null)}
+            onClick={askToLeave}
             className="flex items-center gap-2 px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-2xl text-xs font-black transition-colors cursor-pointer"
           >
             <ArrowLeft className="w-4 h-4" />
@@ -519,8 +568,12 @@ export const SnapPuzzle: React.FC = () => {
         ) : (
           <span className="text-xs font-black text-slate-500">How many pieces?</span>
         )}
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <div
+            className={`flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs ${
+              inProgress ? 'invisible pointer-events-none' : ''
+            }`}
+          >
             {GRID_SIZES.map((g, idx) => (
               <button
                 key={idx}
@@ -533,6 +586,23 @@ export const SnapPuzzle: React.FC = () => {
               </button>
             ))}
           </div>
+          {/* Style is picked on this screen; a finished puzzle offers the other style on its card */}
+          {!photo && (
+            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
+              {STYLES.map((st) => (
+                <button
+                  key={st.id}
+                  onClick={() => setPieceStyle(st.id)}
+                  className={`px-2.5 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
+                    pieceStyle === st.id ? 'bg-indigo-600 text-white shadow-xs font-black' : 'text-slate-600 hover:bg-slate-200'
+                  }`}
+                  title={st.id === 'glass' ? 'Broken glass pieces' : 'Jigsaw pieces'}
+                >
+                  {st.emoji} {st.label}
+                </button>
+              ))}
+            </div>
+          )}
           {photo && (
             <>
               <button
@@ -548,7 +618,9 @@ export const SnapPuzzle: React.FC = () => {
               </button>
               <button
                 onClick={shufflePuzzle}
-                className="p-2 bg-white hover:bg-slate-100 text-slate-600 rounded-xl border border-slate-200 transition-colors cursor-pointer"
+                className={`p-2 bg-white hover:bg-slate-100 text-slate-600 rounded-xl border border-slate-200 transition-colors cursor-pointer ${
+                  inProgress ? 'invisible pointer-events-none' : ''
+                }`}
                 title="Shuffle & Restart"
               >
                 <Shuffle className="w-4 h-4" />
@@ -640,6 +712,13 @@ export const SnapPuzzle: React.FC = () => {
                   <filter id="pz-lift" x="-30%" y="-30%" width="160%" height="160%">
                     <feDropShadow dx="0.03" dy="0.06" stdDeviation="0.05" floodOpacity="0.35" />
                   </filter>
+                  {/* Light catching the edge of a loose glass shard */}
+                  <linearGradient id="pz-glint" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stopColor="#ffffff" stopOpacity="0.5" />
+                    <stop offset="0.3" stopColor="#ffffff" stopOpacity="0.08" />
+                    <stop offset="0.65" stopColor="#ffffff" stopOpacity="0" />
+                    <stop offset="1" stopColor="#bae6fd" stopOpacity="0.3" />
+                  </linearGradient>
                   {pieces.map((p) => (
                     <clipPath key={p.id} id={`pz-clip-${p.id}`}>
                       <path d={p.path} />
@@ -679,7 +758,7 @@ export const SnapPuzzle: React.FC = () => {
                       <path
                         key={p.id}
                         d={p.path}
-                        transform={`translate(${layout.boardX + p.col} ${layout.boardY + p.row})`}
+                        transform={`translate(${layout.boardX + p.hx} ${layout.boardY + p.hy})`}
                         fill="none"
                         stroke="#94a3b8"
                         strokeWidth={0.015}
@@ -692,6 +771,7 @@ export const SnapPuzzle: React.FC = () => {
                 {renderOrder.map((p) => {
                   const pos = restPos(p);
                   const isDragging = draggingIds.includes(p.id);
+                  const glass = pieceStyle === 'glass';
                   return (
                     <g
                       key={p.id}
@@ -709,8 +789,8 @@ export const SnapPuzzle: React.FC = () => {
                       >
                         <image
                           href={photoUrl}
-                          x={-p.col}
-                          y={-p.row}
+                          x={-p.hx}
+                          y={-p.hy}
                           width={grid.cols}
                           height={grid.rows}
                           preserveAspectRatio="xMidYMid slice"
@@ -718,9 +798,10 @@ export const SnapPuzzle: React.FC = () => {
                         />
                         <path
                           d={p.path}
-                          fill="transparent"
-                          stroke={p.placed ? 'rgba(255,255,255,0.35)' : '#ffffff'}
+                          fill={glass && !p.placed ? 'url(#pz-glint)' : 'transparent'}
+                          stroke={p.placed ? 'rgba(255,255,255,0.35)' : glass ? '#e0f2fe' : '#ffffff'}
                           strokeWidth={p.placed ? 0.012 : 0.03}
+                          strokeLinejoin="round"
                         />
                       </g>
                     </g>
@@ -738,7 +819,11 @@ export const SnapPuzzle: React.FC = () => {
               ref={winRef}
               className="p-6 bg-gradient-to-r from-amber-50 via-indigo-50 to-pink-50 rounded-3xl border-3 border-indigo-200 text-center space-y-4 shadow-lg"
             >
-              <div className="text-4xl sm:text-5xl">🎉🧩⭐</div>
+              <div className="text-4xl sm:text-5xl">
+                {celebration?.emoji ?? '🎉'}
+                {pieceStyle === 'glass' ? '💎' : '🧩'}
+                {celebration?.emoji ?? '⭐'}
+              </div>
               <div>
                 <h4 className="text-xl sm:text-2xl font-black text-indigo-950">You did it{name ? `, ${name}` : ''}!</h4>
                 <p className="text-xs sm:text-sm font-bold text-indigo-800 mt-1">
@@ -761,8 +846,17 @@ export const SnapPuzzle: React.FC = () => {
                     Try {GRID_SIZES[sizeIdx + 1].cols * GRID_SIZES[sizeIdx + 1].rows} Pieces {GRID_SIZES[sizeIdx + 1].emoji}
                   </button>
                 )}
+                {STYLES.filter((st) => st.id !== pieceStyle).map((st) => (
+                  <button
+                    key={st.id}
+                    onClick={() => startPuzzle(photo, sizeIdx, st.id)}
+                    className="px-5 py-3 bg-white hover:bg-slate-100 text-violet-700 rounded-2xl font-black text-sm border-2 border-violet-200 shadow-xs transition-all cursor-pointer"
+                  >
+                    Try {st.label} {st.emoji}
+                  </button>
+                ))}
                 <button
-                  onClick={() => setPhoto(null)}
+                  onClick={leavePuzzle}
                   className="px-5 py-3 bg-white hover:bg-slate-100 text-sky-700 rounded-2xl font-black text-sm border-2 border-sky-200 shadow-xs transition-all cursor-pointer flex items-center gap-2"
                 >
                   <Camera className="w-4 h-4" />
@@ -772,9 +866,46 @@ export const SnapPuzzle: React.FC = () => {
             </div>
           ) : (
             <p className="text-center text-xs font-bold text-slate-500">
-              Drag each piece onto the white board. When it's in the right spot it clicks in! 👆
+              {pieceStyle === 'glass'
+                ? "Uh oh, the picture broke! Drag each piece back onto the white board. When it's in the right spot it clicks in! 👆"
+                : "Drag each piece onto the white board. When it's in the right spot it clicks in! 👆"}
             </p>
           )}
+        </div>
+      )}
+
+      {confirmLeave && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-4"
+          onClick={() => setConfirmLeave(false)}
+        >
+          <div
+            className="w-full max-w-sm bg-white rounded-3xl p-6 space-y-4 shadow-xl text-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-5xl">🧩</div>
+            <div>
+              <h2 className="text-xl font-black text-slate-800">Stop this puzzle?</h2>
+              <p className="text-sm font-bold text-slate-500 mt-1">
+                You've put in {placedCount} of {pieceCount} pieces. If you leave, they'll get mixed up again.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2.5">
+              <button
+                onClick={() => setConfirmLeave(false)}
+                autoFocus
+                className="w-full px-6 py-4 bg-gradient-to-r from-indigo-600 to-pink-600 text-white rounded-2xl font-black text-lg shadow-md shadow-indigo-200 active:scale-95 transition-transform cursor-pointer"
+              >
+                Keep Playing! 🧩
+              </button>
+              <button
+                onClick={leavePuzzle}
+                className="w-full px-4 py-2.5 text-slate-500 hover:bg-slate-100 rounded-xl font-bold text-sm cursor-pointer"
+              >
+                Leave the puzzle
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
